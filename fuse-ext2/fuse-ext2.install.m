@@ -52,6 +52,10 @@
 #include <unistd.h>
 #include <getopt.h>
 
+#include <uuid/uuid.h>
+#ifndef uuid_string_t
+typedef char uuid_string_t[37];
+#endif
 #include <Foundation/Foundation.h>
 
 static NSString *kinstalledPath = @"/Library/Filesystems/fuse-ext2.fs/Contents/Info.plist";
@@ -116,9 +120,15 @@ static const NSTimeInterval kNetworkTimeOutInterval = 60.00;
 	[download release];
 	isDownloading = NO;
 	isDownloaded = NO;
-	NSLog(@"fuse-ext2.install: download failed! error - %@ %@",
-		[error localizedDescription],
-		[[error userInfo] objectForKey:NSErrorFailingURLStringKey]);
+
+	NSString *errorKey = nil;
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
+		errorKey = NSURLErrorFailingURLErrorKey;
+#else
+		errorKey = NSErrorFailingURLStringKey;
+#endif
+
+	NSLog(@"fuse-ext2.install: download failed! error - %@ %@", [error localizedDescription], error.userInfo[errorKey]);
 }
 
 - (void) downloadDidFinish: (NSURLDownload *) download
@@ -154,66 +164,123 @@ static const NSTimeInterval kNetworkTimeOutInterval = 60.00;
 
 - (int) downloadFileFromUrl: (NSString *) urlString toFile: (NSString *) toFile
 {
-	NSURLRequest *urlRequest;
-	NSURLDownload *urlDownload;
-	NSLog(@"fuse-ext2.install: downloading from:%@, to:%@", urlString, toFile);
-	urlRequest = [NSURLRequest requestWithURL:[NSURL URLWithString:urlString]
-	                           cachePolicy:NSURLRequestUseProtocolCachePolicy
-	                           timeoutInterval:kNetworkTimeOutInterval];
-	urlDownload = [[NSURLDownload alloc] initWithRequest:urlRequest delegate:self];
-	if (urlDownload == nil) {
-		NSLog(@"fuse-ext2.install: NSURLDownload[] failed");
-		return -1;
-	}
-	[urlDownload setDestination:toFile allowOverwrite:YES];
-	NSLog(@"fuse-ext2.install: downloading started");
-	isDownloading = YES;
-	isDownloaded = NO;
-	while (isDownloading == YES) {
-		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1.0]];
-	}
-	if (isDownloaded == NO) {
-		NSLog(@"fuse-ext2.install: downloading failed");
-		return -1;
-	}
-	return 0;
+    NSURLRequest *urlRequest;
+    NSLog(@"fuse-ext2.install: downloading from:%@, to:%@", urlString, toFile);
+    
+    urlRequest = [NSURLRequest requestWithURL:[NSURL URLWithString:urlString]
+                               cachePolicy:NSURLRequestUseProtocolCachePolicy
+                               timeoutInterval:kNetworkTimeOutInterval];
+    
+    // 使用信号量来保持同步行为
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block BOOL downloadSuccess = NO;
+    __block NSError *downloadError = nil;
+    
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDownloadTask *downloadTask = [session downloadTaskWithRequest:urlRequest 
+        completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+            if (error) {
+                NSLog(@"fuse-ext2.install: Download error: %@", error);
+                downloadError = error;
+                downloadSuccess = NO;
+            } else {
+                // 移动文件到目标位置
+                NSFileManager *fileManager = [NSFileManager defaultManager];
+                NSURL *destinationURL = [NSURL fileURLWithPath:toFile];
+                
+                // 删除已存在的文件
+                [fileManager removeItemAtURL:destinationURL error:nil];
+                
+                // 移动下载的文件
+                NSError *moveError = nil;
+                if ([fileManager moveItemAtURL:location toURL:destinationURL error:&moveError]) {
+                    downloadSuccess = YES;
+                    NSLog(@"fuse-ext2.install: downloading completed");
+                } else {
+                    NSLog(@"fuse-ext2.install: Failed to move file: %@", moveError);
+                    downloadError = moveError;
+                    downloadSuccess = NO;
+                }
+            }
+            
+            dispatch_semaphore_signal(semaphore);
+        }];
+    
+    NSLog(@"fuse-ext2.install: downloading started");
+    [downloadTask resume];
+    
+    // 等待下载完成
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    
+    if (!downloadSuccess) {
+        NSLog(@"fuse-ext2.install: downloading failed");
+        return -1;
+    }
+    
+    return 0;
 }
+
 
 - (NSString *) getValueFromUrl: (NSString *) urlString valueName: (NSString *) valueName
 {
-	NSURL *url;
-	NSData *data;
-	NSArray *node;
-	NSArray *nodes;
-	NSError *error;
-	NSString *value;
-	NSXMLDocument *doc;
-	NSURLRequest *request;
-	NSURLResponse *response;
-	NSLog(@"fuse-ext2.install: checking from '%@'", urlString);
-	url = [NSURL URLWithString:urlString];
-	request = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReturnCacheDataElseLoad timeoutInterval:30.0];
-	data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:&error];
-	if (data == nil) {
-		NSLog(@"fuse-ext2.install: NSURLConnection failed (%@)", error);
-		return nil;
-	}
-	doc = [[NSXMLDocument alloc] initWithData:data options:0 error:&error];
-	if (doc == nil) {
-		NSLog(@"fuse-ext2.install: NSXMLDocument failed (%@)", error);
-		return nil;
-	}
-	NSLog(@"fuse-ext2.install: result;\n'%@'", doc);
-	nodes = [doc nodesForXPath:valueName error:&error];
-	if (nodes == nil || [nodes count] == 0) {
-		[doc release];
-		NSLog(@"fuse-ext2.install: nodesForXPath:fuse-ext2 failed (%@)", error);
-		return nil;
-	}
-	value = [[NSString alloc] initWithString:[[nodes objectAtIndex:0] stringValue]];
-	[doc release];
-	return value;
+    NSURL *url;
+    __block NSData *data = nil;
+    NSArray *nodes;
+    NSError *error;
+    NSString *value;
+    NSXMLDocument *doc;
+    NSURLRequest *request;
+    
+    NSLog(@"fuse-ext2.install: checking from '%@'", urlString);
+    url = [NSURL URLWithString:urlString];
+    request = [NSURLRequest requestWithURL:url 
+                            cachePolicy:NSURLRequestReturnCacheDataElseLoad 
+                            timeoutInterval:30.0];
+    
+    // 使用信号量实现同步请求
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSError *downloadError = nil;
+    
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request 
+        completionHandler:^(NSData *responseData, NSURLResponse *response, NSError *error) {
+            if (error) {
+                downloadError = error;
+            } else {
+                data = responseData;
+            }
+            dispatch_semaphore_signal(semaphore);
+        }];
+    
+    [dataTask resume];
+    
+    // 等待请求完成
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    
+    if (data == nil) {
+        NSLog(@"fuse-ext2.install: NSURLSession failed (%@)", downloadError);
+        return nil;
+    }
+    
+    doc = [[NSXMLDocument alloc] initWithData:data options:0 error:&error];
+    if (doc == nil) {
+        NSLog(@"fuse-ext2.install: NSXMLDocument failed (%@)", error);
+        return nil;
+    }
+    
+    NSLog(@"fuse-ext2.install: result;\n'%@'", doc);
+    nodes = [doc nodesForXPath:valueName error:&error];
+    if (nodes == nil || [nodes count] == 0) {
+        [doc release];
+        NSLog(@"fuse-ext2.install: nodesForXPath:fuse-ext2 failed (%@)", error);
+        return nil;
+    }
+    
+    value = [[NSString alloc] initWithString:[[nodes objectAtIndex:0] stringValue]];
+    [doc release];
+    return value;
 }
+
 
 - (NSString *) availableVersion: (NSString *) urlString
 {
@@ -311,7 +378,7 @@ static const NSTimeInterval kNetworkTimeOutInterval = 60.00;
 		NSLog(@"fuse-ext2.install: hdiutil attach failed");
 		goto out;
 	}
-	ret = [self runTaskForPath:@"/usr/local/bin/fuse-ext2.uninstall" withArguments:[NSArray arrayWithObjects:nil] output:nil];
+	ret = [self runTaskForPath:@"/usr/local/bin/fuse-ext2.uninstall" withArguments:nil output:nil];
 	/*
 	 * sudo installer -pkg /Volumes/fuse-ext2/fuse-ext2.pkg -target / -verbose -dumplog
 	 */

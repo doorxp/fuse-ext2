@@ -49,3 +49,5 @@ tools/macosx/Makefile
 ##
 **/fuse-ext2
 tools/macosx/prefpane/build
+*.xcuserstate
+tools/macosx/prefpane/fuse-ext2.xcodeproj/xcuserdata

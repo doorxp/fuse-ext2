@@ -14,13 +14,12 @@
 
 #import "fuse_ext2Pref.h"
 
-#import <Carbon/Carbon.h>
-
+#import "STPrivilegedTask.h"
 static NSString *kreleasePath = @"http://fuse-ext2.svn.sourceforge.net/viewvc/fuse-ext2/release/release.xml";
 static NSString *kinstallPath = @"/usr/local/bin/fuse-ext2.install";
 static NSString *kuninstallPath = @"/usr/local/bin/fuse-ext2.uninstall";
 static NSString *kinstalledPath = @"/Library/Filesystems/fuse-ext2.fs/Contents/Info.plist";
-static NSString *kaboutLabelString = @"fuse-ext2 is a ext2/ext3/ext4 filesystem support for Fuse. Please visit fuse-ext2 webpage (https://github.com/alperakcan/fuse-ext2) for more information.";
+static NSString *kaboutLabelString = @"fuse-ext2 is a ext2/ext3/ext4 filesystem support for Fuse. Please visit fuse-ext2 webpage (https://github.com/doorxp/fuse-ext2) for more information.";
 static NSString *kinstalledString = @"Installed Version:";
 static NSString *kinstallingString = @"Installing new version.";
 static NSString *kcheckingString = @"Checking for new version.";
@@ -98,46 +97,23 @@ static const NSTimeInterval kNetworkTimeOutInterval = 60.00;
 			outFile = [outPipe fileHandleForReading];
 		}
 	} else {
-		// authorized
-		if ([self authorize] == NO) {
-			return -1;
-		}
-		FILE *outPipe = NULL;
-		unsigned int numArgs = [arguments count];
-		const char **args = malloc(sizeof(char*) * (numArgs + 1));
-		if (!args) {
-			[self setTaskRunning:NO];
-			return -1;
-		}
-		const char *cPath = [path fileSystemRepresentation];
-		for (unsigned int i = 0; i < numArgs; i++) {
-			args[i] = [[arguments objectAtIndex:i] fileSystemRepresentation];
-		}
-		
-		args[numArgs] = NULL;
-		
-		AuthorizationFlags myFlags = kAuthorizationFlagDefaults; 
-		result = AuthorizationExecuteWithPrivileges(authorizationReference,  cPath, myFlags, (char * const *) args, &outPipe);
-		free(args);
-		if (result == 0) {
-			int wait_status;
-			int pid = 0;
-			NSRunLoop *runLoop = [NSRunLoop currentRunLoop];
-			do {
-				NSDate *waitDate = [NSDate dateWithTimeIntervalSinceNow:0.1];
-				[runLoop runUntilDate:waitDate];
-				pid = waitpid(-1, &wait_status, WNOHANG);
-			} while (pid == 0);
-			if (pid == -1 || !WIFEXITED(wait_status)) {
-				result = -1;
-			} else {
-				result = WEXITSTATUS(wait_status);
-			}
-			if (output) {
-				int fd = fileno(outPipe);
-				outFile = [[[NSFileHandle alloc] initWithFileDescriptor:fd closeOnDealloc:YES] autorelease];
-			}
-		}
+                STPrivilegedTask *privilegedTask = [STPrivilegedTask new];
+                [privilegedTask setLaunchPath:path];
+                [privilegedTask setArguments:arguments];
+            
+                OSStatus err = [privilegedTask launch];
+                if (err != errAuthorizationSuccess) {
+                        NSLog(@"Error: %d", err);
+                        [privilegedTask release];
+                        return -1;
+                }
+            
+                [privilegedTask waitUntilExit];
+                result = [privilegedTask terminationStatus];
+            
+                outFile = [privilegedTask outputFileHandle];
+            
+                [privilegedTask release];
 	}
 	if (outFile && output) {
 		*output = [outFile readDataToEndOfFile];

@@ -14,8 +14,12 @@
 
 static int do_getxattr(ext2_filsys e2fs, struct ext2_inode *node, const char *name,
 		char *value, size_t size);
-
-int op_getxattr(const char *path, const char *name, char *value, size_t size) {
+#ifdef __APPLE__
+int op_getxattr(const char *path, const char *name, char *value, size_t size, uint32_t position)
+#else
+int op_getxattr(const char *path, const char *name, char *value, size_t size)
+#endif
+ {
 	int rt;
 	ext2_ino_t ino;
 	struct ext2_inode inode;
@@ -23,7 +27,20 @@ int op_getxattr(const char *path, const char *name, char *value, size_t size) {
 
 	debugf("enter");
 	debugf("path = %s", path);
+#ifdef __APPLE__
+	debugf("path = %s, %s, %p, %d, position = %u", path, name, value, size, position);
+#else
 	debugf("path = %s, %s, %p, %d", path, name, value, size);
+#endif
+
+#ifdef __APPLE__
+	// 在 macOS 上，对于标准的扩展属性，position 应该是 0
+	// 如果 position 不为 0，表示要访问资源分支，但 ext2 文件系统不支持
+	if (position != 0) {
+		debugf("position %u not supported", position);
+		return -EINVAL;
+	}
+#endif
 
 	rt = do_check(path);
 	if (rt != 0) {

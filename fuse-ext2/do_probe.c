@@ -46,7 +46,7 @@ int do_probe (struct extfs_data *opts)
 		opts->volname = (char *) malloc(sizeof(char) * (VOLNAME_SIZE_MAX + 1));
 		if (opts->volname != NULL) {
 			memset(opts->volname, 0, sizeof(char) * (VOLNAME_SIZE_MAX + 1));
-			strncpy(opts->volname, e2fs->super->s_volume_name, VOLNAME_SIZE_MAX);
+			strncpy(opts->volname, (const char*)e2fs->super->s_volume_name, VOLNAME_SIZE_MAX);
 			opts->volname[VOLNAME_SIZE_MAX] = '\0';
 		}
 	}
